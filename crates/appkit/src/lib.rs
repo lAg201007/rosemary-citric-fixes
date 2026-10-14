@@ -111,13 +111,13 @@ pub fn bootstrap() {
         segmented::install();
         table::install();
         view_animation::install();
-        // Last of the controls: a cell forwards what its control implements.
-        cell::install();
         bezier::install();
         layer::install();
         coreanimation::install();
         text::install();
         label::install();
+        // Last of the controls: a cell forwards what its control implements.
+        cell::install();
         input_context::install();
         opengl::install();
         darwin::idle::on_idle(opengl::going_idle);
