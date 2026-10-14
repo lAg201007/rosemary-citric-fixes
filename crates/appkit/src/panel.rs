@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 
 use chrome::View;
@@ -7,6 +7,9 @@ use objc::object::Id;
 use objc::sel::Sel;
 
 use crate::define::{class_methods, methods};
+
+#[cfg(target_os = "linux")]
+mod portal;
 
 const CANCEL: i64 = 0;
 const ACCEPT: i64 = 1;
@@ -340,9 +343,7 @@ fn selected_paths(
             return None;
         }
         let mut components = Path::new(name).components();
-        if !matches!(components.next(), Some(std::path::Component::Normal(_)))
-            || components.next().is_some()
-        {
+        if !matches!(components.next(), Some(Component::Normal(_))) || components.next().is_some() {
             return None;
         }
         return Some(vec![directory.join(name)]);
@@ -414,6 +415,30 @@ fn paint_picker(
 struct PickerResult {
     selected: Option<Vec<PathBuf>>,
     shows_hidden_files: bool,
+}
+
+enum PortalOutcome {
+    Selected(Vec<PathBuf>),
+    Cancelled,
+    Unavailable,
+}
+
+fn resolve_picker_result(
+    outcome: PortalOutcome,
+    shows_hidden_files: bool,
+    fallback: impl FnOnce() -> Option<PickerResult>,
+) -> Option<PickerResult> {
+    match outcome {
+        PortalOutcome::Selected(selected) => Some(PickerResult {
+            selected: Some(selected),
+            shows_hidden_files,
+        }),
+        PortalOutcome::Cancelled => Some(PickerResult {
+            selected: None,
+            shows_hidden_files,
+        }),
+        PortalOutcome::Unavailable => fallback(),
+    }
 }
 
 fn picker_shortcut(scancode: u32, modifiers: u16) -> Option<PickerShortcut> {
@@ -828,7 +853,13 @@ fn run_picker(panel: &PanelState) -> Option<PickerResult> {
 fn select(receiver: Id) -> i64 {
     let mut panel = state(receiver);
     panel.selected.clear();
-    let Some(result) = run_picker(&panel) else {
+    #[cfg(target_os = "linux")]
+    let portal_outcome = portal::show(&panel);
+    #[cfg(not(target_os = "linux"))]
+    let portal_outcome = PortalOutcome::Unavailable;
+    let Some(result) = resolve_picker_result(portal_outcome, panel.shows_hidden_files, || {
+        run_picker(&panel)
+    }) else {
         update(receiver, |state| state.selected.clear());
         return CANCEL;
     };
@@ -1326,6 +1357,39 @@ mod tests {
                 "accepted unsafe save name {filename:?}"
             );
         }
+    }
+
+    #[test]
+    fn an_unavailable_portal_uses_the_internal_picker() {
+        let fallback_calls = std::cell::Cell::new(0);
+        let result = resolve_picker_result(PortalOutcome::Unavailable, false, || {
+            fallback_calls.set(fallback_calls.get() + 1);
+            Some(PickerResult {
+                selected: Some(vec![PathBuf::from("/tmp/place.rbxl")]),
+                shows_hidden_files: false,
+            })
+        })
+        .unwrap();
+
+        assert_eq!(fallback_calls.get(), 1);
+        assert_eq!(
+            result.selected,
+            Some(vec![PathBuf::from("/tmp/place.rbxl")])
+        );
+    }
+
+    #[test]
+    fn cancelling_the_portal_does_not_open_the_internal_picker() {
+        let fallback_calls = std::cell::Cell::new(0);
+        let result = resolve_picker_result(PortalOutcome::Cancelled, true, || {
+            fallback_calls.set(fallback_calls.get() + 1);
+            None
+        })
+        .unwrap();
+
+        assert_eq!(fallback_calls.get(), 0);
+        assert!(result.selected.is_none());
+        assert!(result.shows_hidden_files);
     }
 
     #[test]
